@@ -2149,12 +2149,23 @@ export default (): Record<string, unknown> => {
      * a skipped refetch leaves the row total and the page count stale until the next `fetchRows` call, so reconcile them yourself.
      * Valid cell edits apply at once; if **`onRowsUpdate`** fails or **`beforeRowsMutation`** blocks the update, affected cells roll back.
      *
+     * Set it to `null` to turn server-backed loading off again, for example through
+     * [`updateSettings()`](@/api/core.md#updatesettings).
+     *
+     * While the [`sheetsBar`](#sheetsbar) option is enabled, a grid-level `dataProvider` is ignored (with one console
+     * warning), and the grid gets it back when you turn the sheets bar off. Declare `dataProvider` in the `settings` of
+     * each sheet that loads from a server instead. While a sheet that declares its own `dataProvider` is shown, a
+     * `dataProvider` passed through [`updateSettings()`](@/api/core.md#updatesettings) replaces that sheet's own one.
+     * The only exception is the same object as the ignored grid-level value, which the sheet ignores too. So if you
+     * keep a grid-level `dataProvider` anyway, pass the same object every time: a framework wrapper that builds a new
+     * object on every render re-configures the sheet you see.
+     *
      * This option can only be set at the [grid level](@/guides/configuration/configuration-options/configuration-options.md#set-grid-options).
      * It has no effect when set in the [`columns`](#columns), [`cells`](#cells), or [`cell`](#cell) options.
      *
      * @since 17.1.0
      * @memberof Options#
-     * @type {object}
+     * @type {object|null}
      * @default undefined
      * @category Core
      * @configScope grid
@@ -3435,7 +3446,8 @@ export default (): Record<string, unknown> => {
      *
      * The option takes different values at the two levels it works at, so they are listed
      * separately below. At the grid level it switches the plugin on and carries its settings. Inside
-     * [`columns`](#columns) it does one thing only: `false` takes that column out of filtering.
+     * [`columns`](#columns), `false` takes that column out of filtering, and an object can set the
+     * column's own `availableConditions`.
      *
      * **At the grid level:**
      *
@@ -3445,13 +3457,46 @@ export default (): Record<string, unknown> => {
      * | `true`    | Enable the [`Filters`](@/api/filters.md) plugin                      |
      * | An object | Enable the [`Filters`](@/api/filters.md) plugin with custom settings |
      *
-     * If you set the `filters` option to an object, you can configure the following settings. Both
-     * of them are read once, for the whole grid, so neither can be set per column:
+     * If you set the `filters` option to an object, you can configure the following settings.
+     * `searchMode` and `filterFixedRows` are read once, for the whole grid, so they cannot be set per
+     * column. `availableConditions` can be set at both levels:
      *
-     * | Property           | Possible values       | Default  | Description                                                                                                                                                         |
-     * | ------------------ | --------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-     * | `searchMode`       | `'show'` \| `'apply'` | `'show'` | Enable filtering only visible elements                                                                                                                              |
-     * | `filterFixedRows`  | `true` \| `false`     | `true`   | `true`: Filter the whole dataset, including the rows pinned by [`fixedRowsTop`](#fixedrowstop) and [`fixedRowsBottom`](#fixedrowsbottom)<br>`false`: Leave the pinned rows out of the filter |
+     * | Property              | Possible values                         | Default     | Description                                                                                                                                                         |
+     * | --------------------- | --------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+     * | `searchMode`          | `'show'` \| `'apply'`                   | `'show'`    | Enable filtering only visible elements                                                                                                                              |
+     * | `filterFixedRows`     | `true` \| `false`                       | `true`      | `true`: Filter the whole dataset, including the rows pinned by [`fixedRowsTop`](#fixedrowstop) and [`fixedRowsBottom`](#fixedrowsbottom)<br>`false`: Leave the pinned rows out of the filter |
+     * | `availableConditions` | An array \| An object                   | `undefined` | The operators the **Filter by condition** lists offer. See below.                                                                                                  |
+     *
+     * `availableConditions` takes one of three shapes:
+     *
+     * | Shape                               | Description                                                                                                  |
+     * | ----------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+     * | An array of condition names         | Offer only these conditions, in this order. `'---------'` adds a separator.                                   |
+     * | `{ exclude: [...] }`                | Offer the default list for the column's data type, minus these conditions.                                    |
+     * | An object keyed by data type        | One of the two shapes above per data type: `text`, `numeric`, `date`, `intl-date`, `intl-time`, `intl-datetime`. |
+     *
+     * The condition names are the ones [`addCondition()`](@/api/filters.md#addcondition) takes, for
+     * example `'eq'`, `'gt'`, `'between'`, or `'not_between'`. A column whose type has no list of its
+     * own (for example `dropdown`) uses the `text` list. **None** always stays first. A name the
+     * column's data type does not offer is left out. The setting changes the lists only: a condition
+     * added through [`addCondition()`](@/api/filters.md#addcondition) still filters, and its select
+     * still shows it.
+     *
+     * When the grid is created, and when the setting changes, a console warning names each condition
+     * that no data type offers, each listed condition a column's data type does not offer, and each
+     * data type key without a list of its own. Such a key is ignored; the other entries still apply.
+     *
+     * A column's own `availableConditions` replaces the grid-level one for that column. The two are
+     * not merged. A column whose own value is `undefined` uses the grid-level value.
+     *
+     * Updating the `filters` option through [`updateSettings()`](@/api/core.md#updatesettings)
+     * clears the filters that are applied. A `filters` object that leaves out `availableConditions`
+     * keeps the previous value, and setting `filters` to `false` does not clear it either. Pass
+     * `availableConditions: undefined` or `filters: true` to go back to the default lists.
+     *
+     * `availableConditions` changes what the condition lists contain, not which parts the menu
+     * shows. The [`dropdownMenu`](#dropdownmenu) option decides that, so if its configuration leaves
+     * out or hides `filter_by_condition`, the setting has nothing to act on.
      *
      * Set `filterFixedRows` to `false` when the pinned rows hold totals or headings rather than data.
      * Those rows are then never hidden by a filter, and their values are not offered in the
@@ -3473,19 +3518,22 @@ export default (): Record<string, unknown> => {
      *
      * **Inside `columns`:**
      *
-     * | Setting        | Description                                                                          |
-     * | -------------- | ------------------------------------------------------------------------------------ |
-     * | `false`        | Hide the filter controls in this column's dropdown menu                              |
-     * | Anything else  | No effect – the column keeps whatever the grid-level setting gave it                  |
+     * | Setting                             | Description                                                                          |
+     * | ----------------------------------- | ------------------------------------------------------------------------------------ |
+     * | `false`                             | Hide the filter controls in this column's dropdown menu                              |
+     * | `{ availableConditions: ... }`      | Choose the operators this column's **Filter by condition** lists offer               |
+     * | Anything else                       | No effect – the column keeps whatever the grid-level setting gave it                  |
      *
      * The column's dropdown menu still opens, so entries such as **Clear column** stay available.
      * The plugin's API is not affected either: [`addCondition()`](@/api/filters.md#addcondition)
      * still filters such a column, the same way [`columnSorting`](#columnsorting)'s `headerAction`
      * leaves sorting through the API working.
      *
-     * An object written inside `columns` is **ignored**, and logs a warning once per grid. Since 19.0,
-     * TypeScript rejects it too: a column's `filters` is typed `boolean`, and the grid-level object
-     * accepts only `searchMode` and `filterFixedRows`.
+     * Inside `columns`, an object is read for `availableConditions` only. Any other key in it, such
+     * as `searchMode` or `filterFixedRows`, is **ignored**, and logs a warning once per grid. Since
+     * 19.0, TypeScript rejects it too: a column's `filters` is typed `boolean` or
+     * `{ availableConditions }`, and the grid-level object accepts only `searchMode`,
+     * `filterFixedRows`, and `availableConditions`.
      *
      * The switch is read from the column meta, which the [`cells`](#cells) and [`cell`](#cell)
      * options do not reach, so filtering cannot be turned off for a single cell. Filtering works on
@@ -3520,7 +3568,21 @@ export default (): Record<string, unknown> => {
      *   { filters: false },
      * ],
      *
-     * // WRONG: the sub-options are grid-level, so this object is ignored, warns, and does not compile
+     * // remove "Is not between" from every numeric column
+     * filters: {
+     *   availableConditions: {
+     *     numeric: { exclude: ['not_between'] },
+     *   },
+     * },
+     *
+     * // offer only a few operators in one column, in this order
+     * filters: true,
+     * columns: [
+     *   { filters: { availableConditions: ['eq', 'neq', '---------', 'empty', 'not_empty'] } },
+     *   {},
+     * ],
+     *
+     * // WRONG: `filterFixedRows` is grid-level, so it is ignored here, warns, and does not compile
      * columns: [
      *   { filters: { filterFixedRows: false } },
      * ],
@@ -4913,6 +4975,83 @@ export default (): Record<string, unknown> => {
     maxCols: Infinity,
 
     /**
+     * The `maxLength` option sets the maximum number of characters that a cell can hold.
+     *
+     * The limit counts the characters a reader sees, in the same way as the length limit of a sheet name
+     * in the [`SheetsBar`](@/api/sheetsBar.md) plugin. A flag, an emoji with a skin tone, and a letter
+     * with a combining accent each count as one character.
+     *
+     * Handsontable enforces the limit in two places:
+     * - In the cell editor. The [`text`](@/guides/cell-types/text-cell-type/text-cell-type.md) editor, and any custom
+     * editor that extends it, stops the user from typing or pasting more characters than the limit allows.
+     * The `autocomplete`, `dropdown`, and `handsontable` editors cap what the user types in the same way, but
+     * the user can still pick an option that is longer than the limit, and the validator then marks it
+     * as invalid. The built-in editors of the other cell types, such as `numeric`, `date`, and `password`,
+     * don't limit input.
+     * - In the [cell validator](@/guides/cell-functions/cell-validator/cell-validator.md), which marks a
+     * value that is too long as invalid. Use [`allowInvalid`](#allowinvalid) to decide whether the grid keeps
+     * such a value. The validator checks the values that you type, paste into the grid, or write with
+     * [`setDataAtCell()`](@/api/core.md#setdataatcell), and the values that
+     * [`validateCells()`](@/api/core.md#validatecells) checks. It doesn't check the values that you load with
+     * [`loadData()`](@/api/core.md#loaddata), [`updateData()`](@/api/core.md#updatedata), or
+     * [`setSourceDataAtCell()`](@/api/core.md#setsourcedataatcell), or that a data provider fetches. Such a value
+     * stays unmarked until you call `validateCells()`.
+     *
+     * If a cell also has a [`validator`](#validator), a value must pass both checks. The length check
+     * runs first. Setting `validator` to `false` turns off the validator, but not the length check.
+     *
+     * Keep these points in mind:
+     * - Handsontable checks string values only. It doesn't check a value that is stored as a number, such as
+     * the digits typed into a `numeric` cell, or as any other non-string type.
+     * - The validator checks every string value in a cell that has a limit, whatever the cell type is. If you
+     * set `maxLength` at the grid level, it also applies to the text of `date`, `time`, `dropdown`, and
+     * `autocomplete` cells, so a date such as `'2026-10-02'` is invalid with `maxLength: 8`. Set the option on
+     * the columns that hold free text instead.
+     * - A cell that has a limit validates every write, as any cell with a validator does. Validation is
+     * asynchronous, so [`setDataAtCell()`](@/api/core.md#setdataatcell) applies a value after the validation
+     * finishes, and [`getDataAtCell()`](@/api/core.md#getdataatcell) returns the previous value until then. Use the
+     * [`afterChange`](@/api/hooks.md#afterchange) hook to react to the new value.
+     * - The editor and the validator both count the value after [`trimWhitespace`](#trimwhitespace) is
+     * applied, so the leading and trailing spaces of a pasted text don't count.
+     * - With the [`Formulas`](@/api/formulas.md) plugin, the editor counts the formula that the user types,
+     * but the validator counts the calculated result. With `maxLength: 5`, the editor cuts `=SUM(A1:A10)`
+     * to `=SUM(`, although the result `55` fits.
+     * - If your app already uses `maxLength` as a custom cell meta key, for example to feed your own validator
+     * or editor, the built-in check and the editor limit now apply to those cells too.
+     *
+     * By default, the number of characters is not limited.
+     *
+     * Read more:
+     * - [Text cell type](@/guides/cell-types/text-cell-type/text-cell-type.md)
+     * - [Cell validator](@/guides/cell-functions/cell-validator/cell-validator.md)
+     * - [`allowInvalid`](#allowinvalid)
+     * - [`validator`](#validator)
+     *
+     * @memberof Options#
+     * @since 19.0.0
+     * @type {number}
+     * @default Infinity
+     * @category Core
+     * @configScope grid columns cells cell
+     *
+     * @example
+     * ```js
+     * // limit the free-text columns, and leave the others unlimited
+     * columns: [
+     *   { data: 'code', maxLength: 10 },
+     *   { data: 'comment', maxLength: 140, allowInvalid: false },
+     *   { data: 'quantity', type: 'numeric' },
+     * ],
+     *
+     * // let a single cell hold more than its column allows
+     * cell: [
+     *   { row: 0, col: 0, maxLength: 20 },
+     * ],
+     * ```
+     */
+    maxLength: Infinity,
+
+    /**
      * The `maxRows` option sets a maximum number of rows.
      *
      * The `maxRows` option is used:
@@ -5478,6 +5617,13 @@ export default (): Record<string, unknown> => {
     /**
      * The `noWordWrapClassName` option lets you add a CSS class name
      * to each cell that has the [`wordWrap`](#wordWrap) option set to `false`.
+     *
+     * Handsontable always adds the built-in `htNoWrap` class, which keeps the content on one line,
+     * and then adds your class too. You can use your class for styling without a `white-space` rule.
+     * To set a different `white-space` value, use a selector stronger than `.handsontable .htNoWrap`,
+     * for example `.handsontable td.yourClass`.
+     *
+     * If you set `noWordWrapClassName` to an empty string, Handsontable adds no class at all.
      *
      * Read more:
      * - [`wordWrap`](#wordWrap)
@@ -7346,25 +7492,46 @@ export default (): Record<string, unknown> => {
     tableClassName: undefined,
 
     /**
-     * The `textEllipsis` option configures whether the text content in the cells should be truncated with an ellipsis (three dots).
+     * The `textEllipsis` option configures whether the text content in the cells should be truncated with an ellipsis (three dots), either on one line or after a number of lines. Support for a number was added in 19.0.0.
      *
      * You can set the `textEllipsis` option to one of the following:
      *
-     * | Setting           | Description                                   |
-     * | ----------------- | --------------------------------------------- |
-     * | `false` (default) | Don't truncate text content with an ellipsis  |
-     * | `true`            | Truncate text content with an ellipsis        |
+     * | Setting                    | Description                                                                |
+     * | -------------------------- | -------------------------------------------------------------------------- |
+     * | `false` (default)          | Don't truncate text content with an ellipsis                               |
+     * | `true`                     | Keep text content on one line and truncate it with an ellipsis             |
+     * | A number, `2` or greater   | Wrap text content and truncate it with an ellipsis after that many lines  |
+     *
+     * A number of `1` works like `true`. A number that is not a positive integer (such as `0`, `-1`, or `2.5`)
+     * works like `false`.
+     *
+     * A number works in cells whose renderer writes plain text through the built-in `textRenderer`.
+     * That covers the `text`, `numeric`, `date`, `time`, `intl-date`, `intl-datetime`, `intl-time`, `select`,
+     * `autocomplete`, `dropdown`, and `handsontable` cell types, and any custom renderer that calls
+     * `textRenderer`. Renderers that draw their own markup, such as the `html` and `password` renderers (and
+     * the `autocomplete` renderer with `allowHtml: true`), can't clamp: for them a number works like `true`,
+     * and the text stays on one line with an ellipsis.
+     *
+     * Truncation only changes how the text looks. The full text stays in the cell's DOM, in
+     * [`getData()`](@/api/core.md#getdata), and in copied data. The grid shows no tooltip with the full text.
+     *
+     * The [`wordWrap`](#wordwrap) option set to `false` takes precedence over a number: the text stays on
+     * one line and ends with an ellipsis.
+     *
+     * A row grows up to the given number of lines, so the clamped text stays readable.
      *
      * ::: tip
      * The `autocomplete`, `dropdown`, and `handsontable` cell types default this option to `true`, so a
      * long value stays on one line and truncates with an ellipsis, clear of the dropdown arrow. To
      * restore wrapping, set `textEllipsis: false` on the column that declares the type (or in `cells` /
-     * `setCellMeta`). This changed in 19.0.0.
+     * `setCellMeta`). To show a number of lines in them, set the number there too. A grid-level `textEllipsis`
+     * does not reach these columns, because the cell type's own value wins over the grid level. This changed in
+     * 19.0.0.
      * :::
      *
      * @since 16.0.0
      * @memberof Options#
-     * @type {boolean}
+     * @type {boolean|number}
      * @default false
      * @category Core
      * @configScope grid columns cells cell
@@ -7375,6 +7542,10 @@ export default (): Record<string, unknown> => {
      *   {
      *     // truncate text content with an ellipsis
      *     textEllipsis: true,
+     *   },
+     *   {
+     *     // wrap text content and truncate it with an ellipsis after 3 lines
+     *     textEllipsis: 3,
      *   },
      *   {
      *     // don't truncate text content with an ellipsis
@@ -7932,14 +8103,21 @@ export default (): Record<string, unknown> => {
      *
      * You can set the `undo` option to one of the following:
      *
-     * | Setting | Description                                        |
-     * | ------- | -------------------------------------------------- |
-     * | `true`  | Enable the [`UndoRedo`](@/api/undoRedo.md) plugin  |
-     * | `false` | Disable the [`UndoRedo`](@/api/undoRedo.md) plugin |
+     * | Setting                    | Description                                                                 |
+     * | -------------------------- | --------------------------------------------------------------------------- |
+     * | `true`                     | Enable the [`UndoRedo`](@/api/undoRedo.md) plugin                           |
+     * | `false`                    | Disable the [`UndoRedo`](@/api/undoRedo.md) plugin                          |
+     * | `{ maxHistory: <number> }` | Enable the plugin, and keep at most `maxHistory` steps on the undo stack    |
      *
-     * By default, the `undo` option is set to `true`,
+     * By default, the `undo` option is set to `true`, and the undo stack has no size limit.
      * To disable the [`UndoRedo`](@/api/undoRedo.md) plugin completely,
-     * set the `undo` option to `false`.
+     * set the `undo` option to `false`. With `false`, nothing is recorded, so calling `undo()` through the
+     * API undoes nothing either.
+     *
+     * With `maxHistory`, the oldest step is dropped once the stack grows past the limit. `maxHistory` takes
+     * a whole number from `0` up, or `Infinity` (no limit, the default); `0` keeps no steps. Lowering it
+     * with `updateSettings()` drops the oldest steps at once. Any other value is ignored with a warning,
+     * and the previous limit stays. The object form is available since 19.0.0.
      *
      * Read more:
      * - [Undo and redo](@/guides/accessories-and-menus/undo-redo/undo-redo.md)
@@ -7948,8 +8126,8 @@ export default (): Record<string, unknown> => {
      * It has no effect when set in the [`columns`](#columns), [`cells`](#cells), or [`cell`](#cell) options.
      *
      * @memberof Options#
-     * @type {boolean}
-     * @default undefined
+     * @type {boolean|object}
+     * @default true
      * @category UndoRedo
      * @configScope grid
      *
@@ -7957,6 +8135,11 @@ export default (): Record<string, unknown> => {
      * ```js
      * // enable the `UndoRedo` plugin
      * undo: true,
+     *
+     * // enable the `UndoRedo` plugin, and keep the last 100 steps
+     * undo: {
+     *   maxHistory: 100,
+     * },
      * ```
      */
     undo: true,

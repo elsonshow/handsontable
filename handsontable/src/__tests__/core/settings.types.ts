@@ -185,6 +185,7 @@ const allSettings: Required<Handsontable.GridSettings> = {
   manualRowMove: true,
   manualRowResize: true,
   maxCols: 123,
+  maxLength: 123,
   maxRows: 123,
   mergeCells: true,
   minCols: 123,
@@ -288,7 +289,7 @@ const allSettings: Required<Handsontable.GridSettings> = {
   strict: true,
   tableClassName: oneOf('foo', ['first-class-name', 'second-class-name']),
   tabMoves: oneOf({ col: 1, row: 1 }, (event: KeyboardEvent) => ({ row: 2, col: 2 })),
-  textEllipsis: false,
+  textEllipsis: oneOf(true_or_false, 3),
   themeName: 'ht-theme-some-theme',
   theme: '',
   title: 'foo',
@@ -617,8 +618,12 @@ const allSettings: Required<Handsontable.GridSettings> = {
   afterUnmergeCells: (cellRange, auto) => {},
   afterUntrimRow: (rows) => {},
   afterUpdateData: (sourceData, firstTime, source) => {},
-  afterDataProviderFetch: (result) => {},
-  afterDataProviderFetchError: (error, queryParameters) => {},
+  afterDataProviderFetch: (result) => {
+    const restored: boolean | undefined = result.isRestored;
+
+    void restored;
+  },
+  afterDataProviderFetchError: (error, queryParameters, isVisible) => {},
   afterDataProviderFetchAbort: (queryParameters, reason) => {},
   afterUpdateSettings: () => {},
   afterValidate: () => {},
@@ -739,6 +744,17 @@ const allSettings: Required<Handsontable.GridSettings> = {
     const _newPageSize: number | 'auto' = newPageSize;
 
     return true;
+  },
+  beforePasteParse: (clipboardData, event) => {
+    const _types: string[] = clipboardData.types;
+    const _text: string = clipboardData.getData('text/plain');
+    const _event: ClipboardEvent | null = event;
+
+    clipboardData.setData('text/plain', _text);
+    clipboardData.clearData('text/html');
+    clipboardData.clearData();
+
+    return false;
   },
   beforePaste: (data, coords) => {
     data.splice(0, 1);
@@ -1032,6 +1048,7 @@ hot.updateSettings({ selectionHandles: true });
 
 // Regression: moveCells must be accepted by updateSettings.
 hot.updateSettings({ moveCells: true });
+hot.updateSettings({ dataProvider: null });
 
 // Regression: afterOnSelectionHandleMouseDown must be accepted by updateSettings.
 hot.updateSettings({ afterOnSelectionHandleMouseDown(event, edge) {} });

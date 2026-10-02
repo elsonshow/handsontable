@@ -2,7 +2,7 @@ import type { default as CellCoords } from '../../3rdparty/walkontable/src/cell/
 import type { default as CellRange } from '../../3rdparty/walkontable/src/cell/range';
 import type { Overlay } from '../../3rdparty/walkontable/src/overlay/regions/_base';
 import type { default as Table } from '../../3rdparty/walkontable/src/table/baseTable';
-import { BasePlugin, defaultMainSettingSymbol } from '../base';
+import { BasePlugin, defaultMainSettingSymbol, type PluginRestoreContext } from '../base';
 import { Hooks } from '../../core/hooks';
 import MergedCellsCollection from './cellsCollection';
 import MergedCellCoords from './cellCoords';
@@ -10,7 +10,7 @@ import AutofillCalculations from './calculations/autofill';
 import SelectionCalculations from './calculations/selection';
 import toggleMergeItem from './contextMenuItem/toggleMerge';
 import { arrayEach } from '../../helpers/array';
-import { isObject, hasOwnProperty } from '../../helpers/object';
+import { deepClone, isObject, hasOwnProperty } from '../../helpers/object';
 import { warn } from '../../helpers/console';
 import { rangeEach, clamp } from '../../helpers/number';
 import { getStyle } from '../../helpers/dom/element';
@@ -52,6 +52,72 @@ interface MergeAnchor {
 
 export interface PhysicalRowMergeSnapshot extends MergeAreaGeometry {
   physicalRows: number[];
+}
+
+/**
+ * One merge as `MergeCells#captureState()` records it: the geometry it draws with, and the anchor
+ * that is its authoritative description (see `MergeAnchor`).
+ */
+interface MergeStateEntry extends MergeAreaGeometry {
+  anchor: MergeAnchor | null;
+  /**
+   * The physical column of each of the merge's columns when it was captured (`null` for one with no
+   * physical index). The anchor holds the first one only, and the order may have changed since.
+   */
+  physicalColumns?: ReadonlyArray<number | null>;
+}
+
+/**
+ * Tells whether two anchors name the same physical cells. A missing anchor equals only a missing one.
+ *
+ * @param {object|null} [left] One anchor.
+ * @param {object|null} [right] The other anchor.
+ * @returns {boolean}
+ */
+function areAnchorsEqual(left: MergeAnchor | null | undefined, right: MergeAnchor | null | undefined): boolean {
+  if (!left || !right) {
+    return !left && !right;
+  }
+
+  return left.physicalColumn === right.physicalColumn &&
+    left.physicalRows.length === right.physicalRows.length &&
+    left.physicalRows.every((row, index) => row === right.physicalRows[index]);
+}
+
+/**
+ * Tells whether a captured merge list holds a merge of the same geometry and anchor as the given one.
+ *
+ * @param {Array} list The captured merges.
+ * @param {object} entry The merge to look for.
+ * @returns {boolean}
+ */
+function isMergeListed(list: readonly MergeStateEntry[], entry: MergeStateEntry): boolean {
+  return list.some(listed => (
+    listed.row === entry.row && listed.col === entry.col && listed.rowspan === entry.rowspan &&
+    listed.colspan === entry.colspan && areAnchorsEqual(listed.anchor, entry.anchor)
+  ));
+}
+
+/**
+ * Tells whether two merge areas share a cell.
+ *
+ * @param {object} left One area.
+ * @param {object} right The other area.
+ * @returns {boolean}
+ */
+function areMergesOverlapping(left: MergeAreaGeometry, right: MergeAreaGeometry): boolean {
+  return left.row < right.row + right.rowspan && right.row < left.row + left.rowspan &&
+    left.col < right.col + right.colspan && right.col < left.col + left.colspan;
+}
+
+/**
+ * Tells whether a value is a merge list `MergeCells#captureState()` returned.
+ *
+ * @param {*} value The value to test.
+ * @returns {boolean}
+ */
+function isMergeState(value: unknown): value is readonly MergeStateEntry[] {
+  return Array.isArray(value);
 }
 
 /**
@@ -269,6 +335,24 @@ export class MergeCells extends BasePlugin {
    */
   #appliedMergeKeys: Set<string> = new Set();
   /**
+   * When set, `updatePlugin()` rebuilds the plugin but holds back the pass that builds the merges
+   * declared in the settings, until {@link MergeCells#runDeferredSettingsPass} runs it. The
+   * SheetsBar plugin sets it around a sheet switch's settings update, which runs while the grid
+   * still holds the departing sheet's data: built there, the arriving sheet's merges were
+   * validated against the departing sheet's size, and their clearing write landed in the
+   * departing sheet's data.
+   *
+   * @private
+   * @type {boolean}
+   */
+  deferSettingsPass = false;
+  /**
+   * Whether `updatePlugin()` held back a settings pass that has not run yet.
+   *
+   * @type {boolean}
+   */
+  #settingsPassPending = false;
+  /**
    * The physical rows every merged cell covers, plus its physical left column, captured while its
    * visual coordinates are authoritative (creation, structural edits). This is the authoritative
    * description of a merge: physical indexes are stable across trimming, so one capture survives any
@@ -398,10 +482,9 @@ export class MergeCells extends BasePlugin {
     // place (a supported contract), and the single-cell decision has to see the final block.
     this.addHook('beforePaste', this.#onBeforePaste, 1000);
     // Runs at 900: after every ordinary `beforeChange` listener, so the recorded geometry is
-    // measured against the change set that actually survives, and before `DataChangeAction`'s
-    // listener at 1000, which reads it. A listener that vetoes part of a paste by nulling its
-    // entries therefore shrinks - or empties - what this records, instead of leaving a snapshot
-    // that describes a write that never happened.
+    // measured against the change set that actually survives. A listener that vetoes part of a
+    // paste by nulling its entries therefore shrinks – or empties – what this records, instead of
+    // dropping a merge the write never reaches.
     this.addHook('beforeChange', this.#onBeforeChange, 900);
     this.addHook('afterChange', this.#onAfterChange);
     this.addHook('beforeDrawBorders', this.#onBeforeDrawAreaBorders);
@@ -409,12 +492,6 @@ export class MergeCells extends BasePlugin {
     this.addHook('beforeBeginEditing', this.#onBeforeBeginEditing);
     this.addHook('modifyRowHeightByOverlayName', this.#onModifyRowHeightByOverlayName);
     this.addHook('modifySinglePassLayout', this.#onModifySinglePassLayout);
-    this.addHook('beforeUndoStackChange', (action: unknown, source: unknown) => {
-      if (source === 'MergeCells') {
-        return false;
-      }
-    });
-
     this.addHook('afterMergeCells', this.#onAfterMergeCellsCapture);
 
     this.registerShortcuts();
@@ -468,6 +545,21 @@ export class MergeCells extends BasePlugin {
     // Copy before `disablePlugin()` clears the field, so `generateFromSettings()` can tell a
     // re-applied area from a newly declared one.
     const alreadyAppliedMerges = new Set(this.#appliedMergeKeys);
+
+    this.#settingsPassPending = false;
+
+    if (this.deferSettingsPass) {
+      this.disablePlugin();
+      this.enablePlugin();
+
+      alreadyAppliedMerges.forEach(key => this.#appliedMergeKeys.add(key));
+      this.#settingsPassPending = true;
+
+      super.updatePlugin();
+
+      return;
+    }
+
     // Taken out of the list before `disablePlugin()`, so their meta is not reset and nothing is
     // written to their cells.
     const keptMerges = this.#takeKeptMerges(alreadyAppliedMerges);
@@ -480,6 +572,31 @@ export class MergeCells extends BasePlugin {
     this.#captureMergeAnchors();
 
     super.updatePlugin();
+  }
+
+  /**
+   * Runs the settings pass that `updatePlugin()` held back while {@link MergeCells#deferSettingsPass}
+   * was set. With `apply` set, the declared merges are built against the data the grid holds now,
+   * so they are validated against its size and their covered cells are cleared in it. Without it,
+   * no merge is built and no cell is written, and the areas applied before stay recorded as
+   * applied. Does nothing when no pass is pending.
+   *
+   * @private
+   * @param {boolean} apply Whether to build the declared merges.
+   */
+  runDeferredSettingsPass(apply: boolean) {
+    if (!this.#settingsPassPending) {
+      return;
+    }
+
+    this.#settingsPassPending = false;
+
+    if (apply) {
+      this.generateFromSettings(new Set(this.#appliedMergeKeys));
+    }
+
+    this.#initialized = true;
+    this.#captureMergeAnchors();
   }
 
   /**
@@ -767,6 +884,48 @@ export class MergeCells extends BasePlugin {
   }
 
   /**
+   * Returns the geometry of every merged cell the lookup matrix holds, as plain
+   * `{ row, col, rowspan, colspan }` records. A merge whose rows are all trimmed stays in the
+   * merge list at its last visual position, but the lookup matrix no longer holds it, so it is
+   * left out: restored at that stale position it would come back over unrelated rows.
+   *
+   * @private
+   * @returns {MergeAreaGeometry[]}
+   */
+  getVisibleMergedAreas(): MergeAreaGeometry[] {
+    const collection = this.mergedCellsCollection;
+
+    return collection.mergedCells
+      .filter(mergedCell => collection.get(mergedCell.row, mergedCell.col) === mergedCell)
+      .map(({ row, col, rowspan, colspan }) => ({ row, col, rowspan, colspan }));
+  }
+
+  /**
+   * Merges the given areas through the automatic path, the one the settings use: no cell is
+   * written, and `beforeMergeCells`/`afterMergeCells` report `auto: true`. An area that does not
+   * fit the grid is skipped without the settings validation's warning, and so is one that
+   * overlaps a merge already in the lookup matrix, since the automatic path skips the overlap
+   * check.
+   *
+   * @private
+   * @param {MergeAreaGeometry[]} areas The areas to merge, in visual indexes.
+   */
+  restoreMergedAreas(areas: MergeAreaGeometry[]): void {
+    const rowCount = this.hot.countRows();
+    const colCount = this.hot.countCols();
+
+    areas
+      .filter(({ row, col, rowspan, colspan }) => row + rowspan <= rowCount && col + colspan <= colCount)
+      .forEach((area) => {
+        const range = toMergeAreaRange(this.hot, area);
+
+        if (this.mergedCellsCollection.getWithinRange(range, true).length === 0) {
+          this.mergeRange(range, true, true);
+        }
+      });
+  }
+
+  /**
    * Returns `true` if a range is mergeable.
    *
    * @private
@@ -801,8 +960,12 @@ export class MergeCells extends BasePlugin {
 
     const { from, to } = cellRange;
 
-    this.unmergeRange(cellRange, true);
-    this.mergeRange(cellRange);
+    // The unmerge of the merges inside the range is part of this merge: one user action, one undo step.
+    this.runOperation('merge_cells', () => {
+      this.#describeMerge(cellRange);
+      this.unmergeRange(cellRange, true);
+      this.mergeRange(cellRange);
+    });
 
     if (from.row !== null && from.col !== null && to.row !== null && to.col !== null) {
       this.hot.selectCell(from.row, from.col, to.row, to.col, false);
@@ -842,6 +1005,47 @@ export class MergeCells extends BasePlugin {
    * @fires Hooks#afterMergeCells
    */
   mergeRange(cellRange: CellRange, auto = false, preventPopulation = false) {
+    return this.runOperation('merge_cells', () => {
+      this.#describeMerge(cellRange);
+
+      return this.#mergeRange(cellRange, auto, preventPopulation);
+    });
+  }
+
+  /**
+   * Attaches the public fields of a merge step: the merged range and the values the merge is about to
+   * collapse, as the undo step has always exposed them. It takes effect only in the outermost
+   * operation, so `mergeSelection()` calls it too.
+   *
+   * @param {CellRange} cellRange Cell range to merge.
+   */
+  #describeMerge(cellRange: CellRange) {
+    const scope = this.hot._getOperationScope();
+    const topStart = cellRange.getTopStartCorner();
+    const bottomEnd = cellRange.getBottomEndCorner();
+
+    scope.describe({ cellRange: deepClone(cellRange) });
+
+    // Read only while a step is recorded: a merge from the settings is not one, and pays nothing.
+    if (
+      scope.getRecordingTransaction() !== null &&
+      topStart.row !== null && topStart.col !== null && bottomEnd.row !== null && bottomEnd.col !== null
+    ) {
+      scope.describe({
+        data: this.hot.getData(topStart.row, topStart.col, bottomEnd.row, bottomEnd.col),
+      });
+    }
+  }
+
+  /**
+   * The body of `mergeRange()`, run inside its operation.
+   *
+   * @param {CellRange} cellRange Cell range to merge.
+   * @param {boolean} auto `true` if is called automatically.
+   * @param {boolean} preventPopulation `true`, if the method should not run `populateFromArray`.
+   * @returns {Array|boolean}
+   */
+  #mergeRange(cellRange: CellRange, auto: boolean, preventPopulation: boolean) {
     const topStart = cellRange.getTopStartCorner();
     const bottomEnd = cellRange.getBottomEndCorner();
 
@@ -1091,6 +1295,227 @@ export class MergeCells extends BasePlugin {
    * @fires Hooks#afterUnmergeCells
    */
   unmergeRange(cellRange: CellRange, auto = false) {
+    this.runOperation('unmerge_cells', () => this.#unmergeRange(cellRange, auto), {
+      cellRange: deepClone(cellRange),
+    });
+  }
+
+  /**
+   * Returns the merges and their anchors, for UndoRedo. When they did not change since the previous
+   * capture, the previous list itself is returned.
+   *
+   * @private
+   * @param {*} previous The value the previous capture returned.
+   * @returns {Array|undefined}
+   */
+  captureState(previous: unknown): unknown {
+    if (!this.mergedCellsCollection) {
+      return undefined;
+    }
+
+    const { mergedCells } = this.mergedCellsCollection;
+
+    // Compared in place first: a capture runs on every operation, the internal batches of the render
+    // path included, and must not allocate while the merges stay as they were.
+    if (isMergeState(previous) && this.#matchesMerges(previous, mergedCells)) {
+      return previous;
+    }
+
+    return mergedCells.map((merge) => {
+      const anchor = this.#mergeAnchors.get(merge);
+
+      return {
+        row: merge.row,
+        col: merge.col,
+        rowspan: merge.rowspan,
+        colspan: merge.colspan,
+        anchor: anchor ? { physicalRows: anchor.physicalRows.slice(), physicalColumn: anchor.physicalColumn } : null,
+        physicalColumns: Array.from(
+          { length: merge.colspan }, (_, offset) => this.hot.toPhysicalColumn(merge.col + offset)
+        ),
+      };
+    });
+  }
+
+  /**
+   * Lists the physical columns of the merges that differ between the two sides of an undo step, for
+   * the UndoRedo check of a `columns` settings update.
+   *
+   * @private
+   * @param {*} state The merges on one side of the step.
+   * @param {*} other The merges on the other side.
+   * @returns {number[]|null} `null` when a merge's columns are not known.
+   */
+  getStateColumns(state: unknown, other: unknown): readonly number[] | null {
+    if (!isMergeState(state) || !isMergeState(other)) {
+      return null;
+    }
+
+    const changed = state.filter(entry => !isMergeListed(other, entry))
+      .concat(other.filter(entry => !isMergeListed(state, entry)));
+    const columns = new Set<number>();
+
+    for (const { physicalColumns } of changed) {
+      if (physicalColumns === undefined) {
+        return null;
+      }
+
+      for (const physicalColumn of physicalColumns) {
+        if (physicalColumn === null) {
+          return null;
+        }
+
+        columns.add(physicalColumn);
+      }
+    }
+
+    return Array.from(columns);
+  }
+
+  /**
+   * Tells whether a recorded merge list still describes the live merges.
+   *
+   * @param {Array} recorded The list a capture returned.
+   * @param {MergedCellCoords[]} merges The live merges.
+   * @returns {boolean}
+   */
+  #matchesMerges(recorded: readonly MergeStateEntry[], merges: readonly MergedCellCoords[]): boolean {
+    return recorded.length === merges.length && merges.every((merge, index) => {
+      const entry = recorded[index];
+
+      return entry.row === merge.row && entry.col === merge.col && entry.rowspan === merge.rowspan &&
+        entry.colspan === merge.colspan && areAnchorsEqual(entry.anchor, this.#mergeAnchors.get(merge));
+    });
+  }
+
+  /**
+   * Puts back the merges a `captureState()` call recorded. It runs after UndoRedo restored the index
+   * maps, so the recorded geometry addresses the same cells again; the merged cells' meta travels in
+   * the UndoRedo journal. No merge hook fires: the merges are restored, not made.
+   *
+   * Given the step's other side, only the merges the step changed are written back, so a merge made
+   * outside any step since – an `updateSettings({ mergeCells })` – survives the undo. After a replay
+   * that inserted or removed rows or columns the live merges are numbered like the restored side, not
+   * like the other one, so the whole list is restored instead.
+   *
+   * @private
+   * @param {*} state The recorded merges.
+   * @param {object} [context] The step being restored.
+   */
+  restoreState(state: unknown, context?: PluginRestoreContext): void {
+    if (!isMergeState(state) || !this.mergedCellsCollection) {
+      return;
+    }
+
+    const other = context?.other;
+
+    if (!isMergeState(other) || context?.reordered === true || !this.#restoreChangedMerges(state, other)) {
+      this.mergedCellsCollection.clear();
+      this.#mergeAnchors = new WeakMap();
+      this.#purgedMerges = new WeakSet();
+      state.forEach(entry => this.#addRecordedMerge(entry));
+    }
+
+    this.#reanchorMergesToVisibleRows();
+    this.hot.markAllCellsChanged();
+  }
+
+  /**
+   * Takes out the live merges the step made and puts back the ones it took, leaving every other live
+   * merge alone.
+   *
+   * @param {Array} target The merges on the restored side of the step.
+   * @param {Array} from The merges on the other side of the step.
+   * @returns {boolean} `false` when a merge the step made cannot be told apart among the live ones (its
+   *   rows are all trimmed, so the lookup does not reach it); nothing is changed then.
+   */
+  #restoreChangedMerges(target: readonly MergeStateEntry[], from: readonly MergeStateEntry[]): boolean {
+    const liveToRemove = from.filter(entry => !isMergeListed(target, entry)).map(entry => (
+      this.mergedCellsCollection.mergedCells.find(merge => (
+        merge.row === entry.row && merge.col === entry.col && merge.rowspan === entry.rowspan &&
+        merge.colspan === entry.colspan && areAnchorsEqual(entry.anchor, this.#mergeAnchors.get(merge))
+      ))
+    ));
+
+    if (liveToRemove.some(merge => merge !== undefined &&
+        this.mergedCellsCollection.get(merge.row, merge.col) !== merge)) {
+      return false;
+    }
+
+    // `add()` does not check a restored merge for overlap, so one made outside any step over the same
+    // cells would stay under it.
+    const toAdd = target.filter(entry => !isMergeListed(from, entry));
+    const liveToKeep = this.mergedCellsCollection.mergedCells
+      .filter(merge => !liveToRemove.includes(merge) && !this.#purgedMerges.has(merge));
+
+    if (toAdd.some(entry => (entry.anchor === null || this.#hasVisibleTopLeft(entry.anchor)) &&
+        liveToKeep.some(merge => areMergesOverlapping(entry, merge)))) {
+      return false;
+    }
+
+    liveToRemove.forEach((merge) => {
+      if (merge !== undefined) {
+        this.mergedCellsCollection.remove(merge.row, merge.col);
+      }
+    });
+    toAdd.forEach(entry => this.#addRecordedMerge(entry));
+
+    // A put-back merge lands at the end. Keep the order the state lists, as a full rebuild would; a
+    // merge made outside any step stays after them.
+    const toKey = ({ row, col, rowspan, colspan }: { row: number, col: number, rowspan: number, colspan: number }) => (
+      `${row},${col},${rowspan},${colspan}`
+    );
+    const positions = new Map<string, number>();
+
+    target.forEach((entry, position) => positions.set(toKey(entry), position));
+    this.mergedCellsCollection.mergedCells.sort((left, right) => (
+      (positions.get(toKey(left)) ?? target.length) - (positions.get(toKey(right)) ?? target.length)
+    ));
+
+    return true;
+  }
+
+  /**
+   * Adds one recorded merge back to the collection, with its anchor.
+   *
+   * @param {object} entry The recorded merge.
+   */
+  #addRecordedMerge({ row, col, rowspan, colspan, anchor }: MergeStateEntry) {
+    // A merge whose rows are all trimmed keeps its stale coordinates, and another merge can be drawn
+    // there now – placed in the lookup matrix first, it would turn that merge away. The re-anchor
+    // leaves it out of the matrix anyway.
+    const merge = anchor !== null && !this.#hasVisibleTopLeft(anchor)
+      ? this.mergedCellsCollection.addOutsideMatrix({ row, col, rowspan, colspan })
+      : this.mergedCellsCollection.add({ row, col, rowspan, colspan }, true);
+
+    if (merge && anchor !== null) {
+      this.#mergeAnchors.set(merge, {
+        physicalRows: anchor.physicalRows.slice(),
+        physicalColumn: anchor.physicalColumn,
+      });
+    }
+  }
+
+  /**
+   * Tells whether a merge anchor has a visible top-left: its column is not hidden from the index space
+   * and at least one of its rows is not trimmed. The rule `#reanchorMergesToVisibleRows()` purges
+   * by.
+   *
+   * @param {MergeAnchor} anchor The anchor.
+   * @returns {boolean}
+   */
+  #hasVisibleTopLeft(anchor: MergeAnchor): boolean {
+    return this.hot.toVisualColumn(anchor.physicalColumn) !== null &&
+      anchor.physicalRows.some(physicalRow => this.hot.toVisualRow(physicalRow) !== null);
+  }
+
+  /**
+   * The body of `unmergeRange()`, run inside its operation.
+   *
+   * @param {CellRange} cellRange Selection cell range.
+   * @param {boolean} auto `true` if called automatically by the plugin.
+   */
+  #unmergeRange(cellRange: CellRange, auto: boolean) {
     const mergedCells = this.mergedCellsCollection.getWithinRange(cellRange);
 
     if (mergedCells.length === 0) {
@@ -1137,85 +1562,6 @@ export class MergeCells extends BasePlugin {
   }
 
   /**
-   * Returns the merge areas that the paste currently being processed is about to destroy, captured
-   * before any of its data reached the grid. The UndoRedo plugin reads this from its own
-   * `beforeChange` listener - registered at a later priority, so it runs after this plugin's -
-   * so the geometry can ride inside the same undo action as the pasted data and a single undo step
-   * puts both back.
-   *
-   * @private
-   * @returns {Array} Array of `{ row, col, rowspan, colspan }` objects. Empty for a change that
-   *   destroys no merge, which is every change other than a multi-cell paste over a merge.
-   */
-  getPasteUnmergeSnapshot(): MergeAreaGeometry[] {
-    return [...this.#pasteUnmergeSnapshot];
-  }
-
-  /**
-   * Captures merge geometry and its physical row anchor before a nested-row removal.
-   *
-   * @private
-   * @returns {Array} Merge snapshots keyed by their physical rows.
-   */
-  getPhysicalRowSpansForRemoval(): PhysicalRowMergeSnapshot[] {
-    if (!this.enabled || !this.mergedCellsCollection) {
-      return [];
-    }
-
-    this.#captureMissingMergeAnchors();
-
-    return this.mergedCellsCollection.mergedCells.map(merge => ({
-      row: merge.row,
-      col: merge.col,
-      rowspan: merge.rowspan,
-      colspan: merge.colspan,
-      physicalRows: this.#mergeAnchors.get(merge)?.physicalRows.slice() ?? [],
-    }));
-  }
-
-  /**
-   * Restores the physical anchor on merge objects recreated by UndoRedo after a nested-row removal.
-   *
-   * @private
-   * @param {PhysicalRowMergeSnapshot[]} snapshots Merge snapshots captured before removal.
-   */
-  restorePhysicalRowSpansAfterRemoval(snapshots: PhysicalRowMergeSnapshot[]) {
-    if (!this.enabled || !this.mergedCellsCollection) {
-      return;
-    }
-
-    snapshots.forEach((snapshot) => {
-      const candidate = this.mergedCellsCollection.get(snapshot.row, snapshot.col);
-      // `get()` maps every covered cell, not just the top-left anchor. After a removal has
-      // slid surviving merges up, those coords can belong to a different merge.
-      let merge = candidate && candidate.row === snapshot.row && candidate.col === snapshot.col
-        ? candidate
-        : false;
-      const physicalColumn = merge ? this.hot.toPhysicalColumn(merge.col) : null;
-
-      if (!merge && snapshot.physicalRows.length > 0) {
-        merge = this.mergedCellsCollection.add({
-          row: snapshot.row,
-          col: snapshot.col,
-          rowspan: snapshot.rowspan,
-          colspan: snapshot.colspan,
-        }, true);
-      }
-
-      const restoredPhysicalColumn = merge ? this.hot.toPhysicalColumn(merge.col) : null;
-
-      if (merge && (physicalColumn ?? restoredPhysicalColumn) !== null && snapshot.physicalRows.length > 0) {
-        this.#mergeAnchors.set(merge, {
-          physicalRows: snapshot.physicalRows.slice(),
-          physicalColumn: physicalColumn ?? restoredPhysicalColumn!,
-        });
-      }
-    });
-
-    this.#reanchorMergesToVisibleRows();
-  }
-
-  /**
    * Merges the specified range.
    *
    * @param {number} startRow Visual start row of the merged cell.
@@ -1259,6 +1605,8 @@ export class MergeCells extends BasePlugin {
    * any draw here would repaint an identical table (#5687).
    */
   #onAfterInit = () => {
+    this.#settingsPassPending = false;
+
     if (this.getSetting<unknown[]>('cells').length > 0) {
       this.hot.suspendRender();
 
@@ -3165,8 +3513,8 @@ export class MergeCells extends BasePlugin {
    * values are still on their way in.
    *
    * A multi-cell clipboard cannot fit inside a merge, so every merge the write touches is recorded
-   * here and dropped in `afterChange` once the data has landed. Recording it before the write is
-   * what lets the UndoRedo plugin capture the geometry - see `getPasteUnmergeSnapshot`.
+   * here and dropped in `afterChange` once the data has landed. The drop runs inside the paste's
+   * own operation, so the paste's undo step restores the merge together with the data.
    *
    * A single-cell clipboard leaves the merge alone. That needs an intervention of its own, because
    * a selection touching a merge is expanded to the merge's whole rectangle and the CopyPaste
@@ -3304,8 +3652,8 @@ export class MergeCells extends BasePlugin {
    *
    * Each merge is unmerged through its own range rather than the written rectangle, because
    * `unmergeRange` matches by a merge's top-left corner and the written rectangle need not contain
-   * it. `auto` is on: the geometry is already known-good, and the undo entry for this is carried by
-   * the paste's own data-change action instead.
+   * it. `auto` is on: the geometry is already known-good, and the drop is part of the paste's own
+   * undo step.
    */
   #unmergeAfterPaste() {
     const snapshot = this.#pasteUnmergeSnapshot;

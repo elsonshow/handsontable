@@ -170,7 +170,7 @@ Search for an option by name, or filter the list down to a single level.
 | <span data-option="fillHandle" data-levels="grid"></span>[`fillHandle`](@/api/options.md#fillhandle) | Yes | No | No | No | Core |  |
 | <span data-option="filter" data-levels="grid columns cells cell"></span>[`filter`](@/api/options.md#filter) | Yes | Yes | Yes | Yes | Core |  |
 | <span data-option="filteringCaseSensitive" data-levels="grid columns cells cell"></span>[`filteringCaseSensitive`](@/api/options.md#filteringcasesensitive) | Yes | Yes | Yes | Yes | Core |  |
-| <span data-option="filters" data-levels="grid columns"></span>[`filters`](@/api/options.md#filters) | Yes | Yes | No | No | Filters | Turn the plugin on at the grid level. Inside `columns`, only `false` has an effect: it hides the filter controls in that column's dropdown menu, and the API still filters the column. The sub-options `searchMode` and `filterFixedRows` are grid-level only. |
+| <span data-option="filters" data-levels="grid columns"></span>[`filters`](@/api/options.md#filters) | Yes | Yes | No | No | Filters | Turn the plugin on at the grid level. Inside `columns`, `false` hides the filter controls in that column's dropdown menu, and the API still filters the column. An object there is read for `availableConditions` only, which replaces the grid-level value for that column. The sub-options `searchMode` and `filterFixedRows` are grid-level only. |
 | <span data-option="filterSelectedItems" data-levels="grid columns cells cell"></span>[`filterSelectedItems`](@/api/options.md#filterselecteditems) | Yes | Yes | Yes | Yes | Core |  |
 | <span data-option="filterValueComparator" data-levels="grid columns"></span>[`filterValueComparator`](@/api/options.md#filtervaluecomparator) | Yes | Yes | No | No | Filters | Orders a column's "Filter by value" list, which is built once per column. The comparator is read from the first listed row's cell meta, so a `cells` or `cell` value is not a reliable way to set it. Set it at the grid level or inside `columns`. |
 | <span data-option="fixedColumnsLeft" data-levels="grid"></span>[`fixedColumnsLeft`](@/api/options.md#fixedcolumnsleft) | Yes | No | No | No | Core |  |
@@ -206,6 +206,7 @@ Search for an option by name, or filter the list down to a single level.
 | <span data-option="manualRowMove" data-levels="grid"></span>[`manualRowMove`](@/api/options.md#manualrowmove) | Yes | No | No | No | ManualRowMove |  |
 | <span data-option="manualRowResize" data-levels="grid"></span>[`manualRowResize`](@/api/options.md#manualrowresize) | Yes | No | No | No | ManualRowResize |  |
 | <span data-option="maxCols" data-levels="grid"></span>[`maxCols`](@/api/options.md#maxcols) | Yes | No | No | No | Core |  |
+| <span data-option="maxLength" data-levels="grid columns cells cell"></span>[`maxLength`](@/api/options.md#maxlength) | Yes | Yes | Yes | Yes | Core |  |
 | <span data-option="maxRows" data-levels="grid"></span>[`maxRows`](@/api/options.md#maxrows) | Yes | No | No | No | Core |  |
 | <span data-option="maxSelections" data-levels="grid columns cells cell"></span>[`maxSelections`](@/api/options.md#maxselections) | Yes | Yes | Yes | Yes | Core |  |
 | <span data-option="mergeCells" data-levels="grid"></span>[`mergeCells`](@/api/options.md#mergecells) | Yes | No | No | No | MergeCells |  |
